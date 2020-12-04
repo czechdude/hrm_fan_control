@@ -2,6 +2,7 @@
  * A modified BLE client that will read BLE HRM 
  * and control a relay
  * author Andrew Grabbs
+ * reconnect and relay optimization by Czechdude
  */
 
 #include "BLEDevice.h"
@@ -13,9 +14,15 @@
 // Set number of relays
 #define NUM_RELAYS 3
 
-// Heart Rate Zones
-#define ZONE_1 100 // 70 bpm
-#define ZONE_2 120 // 100 bpm
+// Heart Rate Tresholds
+#define T_0 65 // start fan from 90 bpm
+#define T_1 70 // enter second speed at 145 bpm
+#define T_2 80 // enter third speed at 160 bpm
+
+#define Z_0 0
+#define Z_1 1
+#define Z_2 2
+#define Z_3 3
 
 // Assign each GPIO to a relay
 uint8_t relayGPIOs[NUM_RELAYS] = {25, 26, 27};
@@ -26,12 +33,14 @@ static BLEUUID serviceUUID("0000180d-0000-1000-8000-00805f9b34fb");
 static BLEUUID charUUID(BLEUUID((uint16_t)0x2A37));
 //0x2A37
 
+static unsigned short prev = 0;
 static boolean doConnect = false;
 static boolean connected = false;
 static boolean notification = false;
-static boolean doScan = false;
+static boolean doScan = true;
 static BLERemoteCharacteristic* pRemoteCharacteristic;
 static BLEAdvertisedDevice* myDevice;
+static BLEScan* pBLEScan;
 
 static void notifyCallback(
   BLERemoteCharacteristic* pBLERemoteCharacteristic,
@@ -41,31 +50,39 @@ static void notifyCallback(
     Serial.print("Heart Rate: ");
     Serial.print(pData[1], DEC);
     Serial.println("bpm");
-    if(pData[1] == 0) {
+    if(pData[1] <= T_0 && prev != Z_0) {
       for(int i=1; i<=NUM_RELAYS; i++){
         digitalWrite(relayGPIOs[i-1], HIGH);
       }
+      prev = Z_0;
+      Serial.println("ZONE 0!");
     }
-    else if(pData[1] <= ZONE_1 && pData[1] > 0) {
-      Serial.println("ZONE 1!");
+    else if(pData[1] <= T_1 && pData[1] > T_0 && prev != Z_1) {
+      
       for(int i=1; i<=NUM_RELAYS; i++){
         digitalWrite(relayGPIOs[i-1], HIGH);
       }
       digitalWrite(relayGPIOs[0], LOW);
+      prev = Z_1;
+      Serial.println("ZONE 1!");
     }
-    else if(pData[1] > ZONE_1 && pData[1] <= ZONE_2) {
-      Serial.println("ZONE 2!");
-      for(int i=1; i<=NUM_RELAYS; i++){
-        digitalWrite(relayGPIOs[i-1], HIGH);
-      }
+    else if(pData[1] > T_1 && pData[1] <= T_2 && prev != Z_2) {
+      
+     for(int i=1; i<=NUM_RELAYS; i++){
+       digitalWrite(relayGPIOs[i-1], HIGH);
+     }
       digitalWrite(relayGPIOs[1], LOW);
+      prev = Z_2;
+      Serial.println("ZONE 2!");
     }
-    else if(pData[1] > ZONE_2) {
-      Serial.println("ZONE 3!");
-      for(int i=1; i<=NUM_RELAYS; i++){
-        digitalWrite(relayGPIOs[i-1], HIGH);
-      }
+    else if(pData[1] > T_2 && prev != Z_3) {
+      
+    for(int i=1; i<=NUM_RELAYS; i++){
+       digitalWrite(relayGPIOs[i-1], HIGH);
+    }
       digitalWrite(relayGPIOs[2], LOW);
+      prev = Z_3;
+      Serial.println("ZONE 3!");
     }
 }
 
@@ -75,6 +92,7 @@ class MyClientCallback : public BLEClientCallbacks {
 
   void onDisconnect(BLEClient* pclient) {
     connected = false;
+    doScan = true;
     Serial.println("onDisconnect");
   }
 };
@@ -112,14 +130,6 @@ bool connectToServer() {
       return false;
     }
     Serial.println(" - Found our characteristic");
-
-    // Read the value of the characteristic.
-    if(pRemoteCharacteristic->canRead()) {
-      std::string value = pRemoteCharacteristic->readValue();
-      Serial.print("The characteristic value was: ");
-      Serial.println(value.c_str());
-    }
-
     if(pRemoteCharacteristic->canNotify())
       pRemoteCharacteristic->registerForNotify(notifyCallback);
 
@@ -140,12 +150,15 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     // We have found a device, let us now see if it contains the service we are looking for.
     if (advertisedDevice.haveServiceUUID() && advertisedDevice.isAdvertisingService(serviceUUID)) {
 
-      BLEDevice::getScan()->stop();
+      pBLEScan->stop();
       myDevice = new BLEAdvertisedDevice(advertisedDevice);
       doConnect = true;
-      doScan = true;
+      doScan = false;
 
     } // Found our server
+    else{
+      Serial.println("No service available");
+    }
   } // onResult
 }; // MyAdvertisedDeviceCallbacks
 
@@ -164,16 +177,6 @@ void setup() {
       digitalWrite(relayGPIOs[i-1], LOW);
     }
   }
-
-  // Retrieve a Scanner and set the callback we want to use to be informed when we
-  // have detected a new device.  Specify that we want active scanning and start the
-  // scan to run for 5 seconds.
-  BLEScan* pBLEScan = BLEDevice::getScan();
-  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
-  pBLEScan->setInterval(1349);
-  pBLEScan->setWindow(449);
-  pBLEScan->setActiveScan(true);
-  pBLEScan->start(5, false);
 } // End of setup.
 
 
@@ -201,8 +204,14 @@ void loop() {
         notification = true;
     }
   }else if(doScan){
-    BLEDevice::getScan()->start(0);  // this is just eample to start scan after disconnect, most likely there is better way to do it in arduino
+      Serial.println("Rescanning");
+      pBLEScan = BLEDevice::getScan();
+      pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+      pBLEScan->setInterval(1349);
+      pBLEScan->setWindow(449);
+      pBLEScan->setActiveScan(true);
+      pBLEScan->start(5, false);
+      notification = false;
   }
-  
   delay(1000); // Delay a second between loops.
 } // End of loop
