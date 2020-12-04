@@ -2,7 +2,6 @@
  * A modified BLE client that will read BLE HRM 
  * and control a relay
  * author Andrew Grabbs
- * reconnect and relay optimization by Czechdude
  */
 
 #include "BLEDevice.h"
@@ -15,7 +14,7 @@
 #define NUM_RELAYS 3
 
 // Heart Rate Tresholds
-#define T_0 65 // start fan from 90 bpm
+#define T_0 60 // start fan from 90 bpm
 #define T_1 70 // enter second speed at 145 bpm
 #define T_2 80 // enter third speed at 160 bpm
 
@@ -50,14 +49,14 @@ static void notifyCallback(
     Serial.print("Heart Rate: ");
     Serial.print(pData[1], DEC);
     Serial.println("bpm");
-    if(pData[1] <= T_0 && prev != Z_0) {
+    if(pData[1] <= (T_0 - 5) && prev != Z_0) {
       for(int i=1; i<=NUM_RELAYS; i++){
         digitalWrite(relayGPIOs[i-1], HIGH);
       }
       prev = Z_0;
       Serial.println("ZONE 0!");
     }
-    else if(pData[1] <= T_1 && pData[1] > T_0 && prev != Z_1) {
+    else if(pData[1] > T_0 && pData[1] <= (T_1 - 5) && prev != Z_1) {
       
       for(int i=1; i<=NUM_RELAYS; i++){
         digitalWrite(relayGPIOs[i-1], HIGH);
@@ -66,7 +65,7 @@ static void notifyCallback(
       prev = Z_1;
       Serial.println("ZONE 1!");
     }
-    else if(pData[1] > T_1 && pData[1] <= T_2 && prev != Z_2) {
+    else if(pData[1] > T_1 && pData[1] <= (T_2 - 5) && prev != Z_2) {
       
      for(int i=1; i<=NUM_RELAYS; i++){
        digitalWrite(relayGPIOs[i-1], HIGH);
