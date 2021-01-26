@@ -10,6 +10,9 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include <iostream>
+#include <sstream>
+#include <vector>
 
 // Set to true to define Relay as Normally Open (NO)
 #define RELAY_NO true
@@ -17,6 +20,7 @@
 // Set number of relays
 #define NUM_RELAYS 3
 
+#define Z_00 -1
 #define Z_0 0
 #define Z_1 1
 #define Z_2 2
@@ -61,9 +65,9 @@ class PhoneConnection: public BLEServerCallbacks {
 
 class PhoneCallbacks: public BLECharacteristicCallbacks {
   void onRead(BLECharacteristic *pCharacteristic) {
-    char txString[16] = "110*120*130"; // make sure this is big enuffz
-    
-      pCharacteristic->setValue(txString);
+    char * txString = (char *)malloc(128);
+    snprintf(txString, 128, "Z %u", prev);
+    pCharacteristic->setValue(txString);
   }
     void onWrite(BLECharacteristic *pCharacteristic) {
       std::string rxValue = pCharacteristic->getValue();
@@ -87,6 +91,19 @@ class PhoneCallbacks: public BLECharacteristicCallbacks {
           Serial.println("Turning OFF!");
           forceOn = false;
         }
+        if (rxValue.find("*") != -1) { 
+          forceOn = false;
+          std::vector<int> result;
+          std::stringstream ss (rxValue);
+          std::string item;
+
+          while (std::getline (ss, item, '*')) {
+              result.push_back (atoi( item.c_str() ));
+          }
+          T_0 = result[0];
+          T_1 = result[1];
+          T_2 = result[2];
+        }
 
         Serial.println();
         Serial.println("*********");
@@ -107,8 +124,8 @@ static void phoneZoneNotify(int zone){
   // notify on zone
   if (phoneConnected) {
 
-    // Let's convert the value to a char array:
-    char txString[8] = {'Z' , zone};
+    char * txString = (char *)malloc(128);
+    snprintf(txString, 128, "Z %u", zone);
     pCharacteristic->setValue(txString);
     
     pCharacteristic->notify(); // Send the value to the app!
@@ -128,7 +145,18 @@ static void notifyCallback(
   Serial.print("Heart Rate: ");
   Serial.print(pData[1], DEC);
   Serial.println("bpm");
-  if (pData[1] <= (T_0 - 5) && prev != Z_0)
+
+  if (forceOn && prev != Z_00) {
+    for (int i = 1; i <= NUM_RELAYS; i++)
+    {
+      digitalWrite(relayGPIOs[i - 1], HIGH);
+    }
+    digitalWrite(relayGPIOs[2], LOW);
+    prev = Z_00;
+    Serial.println("ZONE 00!");
+    phoneZoneNotify(-1);
+  }
+  else if (pData[1] <= (T_0 - 5) && prev != Z_0)
   {
     for (int i = 1; i <= NUM_RELAYS; i++)
     {
