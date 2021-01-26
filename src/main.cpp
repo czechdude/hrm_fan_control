@@ -52,6 +52,16 @@ static BLEUUID charUUID(BLEUUID((uint16_t)0x2A37));
 BLECharacteristic *pCharacteristic;
 BLECharacteristic *pRecCharacteristic;
 static bool phoneConnected = false;
+static short prev = 0;
+static uint8_t hr = 0;
+static boolean doConnect = false;
+static boolean connected = false;
+static boolean notification = false;
+static boolean doScan = true;
+static BLERemoteCharacteristic *pRemoteCharacteristic;
+static BLEAdvertisedDevice *myDevice;
+static BLEScan *pBLEScan;
+static BLEServer *pServer;
 
 class PhoneConnection: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
@@ -66,7 +76,7 @@ class PhoneConnection: public BLEServerCallbacks {
 class PhoneCallbacks: public BLECharacteristicCallbacks {
   void onRead(BLECharacteristic *pCharacteristic) {
     char * txString = (char *)malloc(128);
-    snprintf(txString, 128, "Z %u", prev);
+    snprintf(txString, 128, "Z %d %u bpm", prev, hr);
     pCharacteristic->setValue(txString);
   }
     void onWrite(BLECharacteristic *pCharacteristic) {
@@ -111,21 +121,12 @@ class PhoneCallbacks: public BLECharacteristicCallbacks {
     }
 };
 
-static short prev = -1;
-static boolean doConnect = false;
-static boolean connected = false;
-static boolean notification = false;
-static boolean doScan = true;
-static BLERemoteCharacteristic *pRemoteCharacteristic;
-static BLEAdvertisedDevice *myDevice;
-static BLEScan *pBLEScan;
-
-static void phoneZoneNotify(int zone){
+static void phoneZoneNotify(int zone, uint8_t hr){
   // notify on zone
   if (phoneConnected) {
 
     char * txString = (char *)malloc(128);
-    snprintf(txString, 128, "Z %u", zone);
+    snprintf(txString, 128, "Z %d %u bpm", zone, hr);
     pCharacteristic->setValue(txString);
     
     pCharacteristic->notify(); // Send the value to the app!
@@ -146,7 +147,9 @@ static void notifyCallback(
   Serial.print(pData[1], DEC);
   Serial.println("bpm");
 
-  if (forceOn && prev != Z_00) {
+  hr = pData[1];
+
+  if (forceOn) {
     for (int i = 1; i <= NUM_RELAYS; i++)
     {
       digitalWrite(relayGPIOs[i - 1], HIGH);
@@ -154,7 +157,7 @@ static void notifyCallback(
     digitalWrite(relayGPIOs[2], LOW);
     prev = Z_00;
     Serial.println("ZONE 00!");
-    phoneZoneNotify(-1);
+    phoneZoneNotify(-1,hr);
   }
   else if (pData[1] <= (T_0 - 5) && prev != Z_0)
   {
@@ -165,7 +168,7 @@ static void notifyCallback(
     prev = Z_0;
     Serial.println("ZONE 0!");
     digitalWrite(ledPin, HIGH);
-    phoneZoneNotify(0);
+    phoneZoneNotify(0,hr);
   }
   else if (pData[1] > T_0 && pData[1] <= (T_1 - 5) && prev != Z_1)
   {
@@ -180,7 +183,7 @@ static void notifyCallback(
     digitalWrite(ledPin, LOW);
     delay(200);
     digitalWrite(ledPin, HIGH);
-    phoneZoneNotify(1);
+    phoneZoneNotify(1,hr);
   }
   else if (pData[1] > T_1 && pData[1] <= (T_2 - 5) && prev != Z_2)
   {
@@ -199,7 +202,7 @@ static void notifyCallback(
     digitalWrite(ledPin, LOW);
     delay(200);
     digitalWrite(ledPin, HIGH);
-    phoneZoneNotify(2);
+    phoneZoneNotify(2,hr);
   }
   else if (pData[1] > T_2 && prev != Z_3)
   {
@@ -222,7 +225,7 @@ static void notifyCallback(
     digitalWrite(ledPin, LOW);
     delay(200);
     digitalWrite(ledPin, HIGH);
-    phoneZoneNotify(3);
+    phoneZoneNotify(3,hr);
   }
 }
 
@@ -337,7 +340,7 @@ void setup()
   pinMode(ledPin, OUTPUT);
 
   // Create the BLE Server
-  BLEServer *pServer = BLEDevice::createServer();
+  pServer = BLEDevice::createServer();
   pServer->setCallbacks(new PhoneConnection());
 
   // Create the BLE Service
@@ -408,6 +411,9 @@ void loop()
     pBLEScan->setActiveScan(true);
     pBLEScan->start(5, false);
     notification = false;
+  }
+  if(!phoneConnected){
+    pServer->getAdvertising()->start();
   }
 
   delay(1000); // Delay a second between loops.
