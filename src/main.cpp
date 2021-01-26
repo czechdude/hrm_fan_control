@@ -7,7 +7,9 @@
 
 #include "Arduino.h"
 #include "BLEDevice.h"
-//#include "BLEScan.h"
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 
 // Set to true to define Relay as Normally Open (NO)
 #define RELAY_NO true
@@ -15,15 +17,18 @@
 // Set number of relays
 #define NUM_RELAYS 3
 
-// Heart Rate Tresholds
-#define T_0 110 // start fan from 110 bpm
-#define T_1 150 // enter second speed at 150 bpm
-#define T_2 160 // enter third speed at 160 bpm
-
 #define Z_0 0
 #define Z_1 1
 #define Z_2 2
 #define Z_3 3
+
+// Heart Rate Tresholds
+int T_0 = 110; // start fan from 110 bpm
+int T_1 = 150; // enter second speed at 150 bpm
+int T_2 = 160; // enter third speed at 160 bpm
+
+bool forceOn = false;
+
 
 // Assign each GPIO to a relay
 uint8_t relayGPIOs[NUM_RELAYS] = {25, 26, 27};
@@ -36,6 +41,59 @@ static BLEUUID serviceUUID("0000180d-0000-1000-8000-00805f9b34fb");
 static BLEUUID charUUID(BLEUUID((uint16_t)0x2A37));
 //0x2A37
 
+#define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" // UART service UUID
+#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+
+BLECharacteristic *pCharacteristic;
+BLECharacteristic *pRecCharacteristic;
+static bool phoneConnected = false;
+
+class PhoneConnection: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      phoneConnected = true;
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      phoneConnected = false;
+    }
+};
+
+class PhoneCallbacks: public BLECharacteristicCallbacks {
+  void onRead(BLECharacteristic *pCharacteristic) {
+    char txString[16] = "110*120*130"; // make sure this is big enuffz
+    
+      pCharacteristic->setValue(txString);
+  }
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      std::string rxValue = pCharacteristic->getValue();
+
+      if (rxValue.length() > 0) {
+        Serial.println("*********");
+        Serial.print("Received Value: ");
+
+        for (int i = 0; i < rxValue.length(); i++) {
+          Serial.print(rxValue[i]);
+        }
+
+        Serial.println();
+
+        // Do stuff based on the command received from the app
+        if (rxValue.find("ON") != -1) { 
+          Serial.println("Turning ON!");
+          forceOn = true;
+        }
+        if (rxValue.find("OFF") != -1) { 
+          Serial.println("Turning OFF!");
+          forceOn = false;
+        }
+
+        Serial.println();
+        Serial.println("*********");
+      }
+    }
+};
+
 static short prev = -1;
 static boolean doConnect = false;
 static boolean connected = false;
@@ -44,6 +102,22 @@ static boolean doScan = true;
 static BLERemoteCharacteristic *pRemoteCharacteristic;
 static BLEAdvertisedDevice *myDevice;
 static BLEScan *pBLEScan;
+
+static void phoneZoneNotify(int zone){
+  // notify on zone
+  if (phoneConnected) {
+
+    // Let's convert the value to a char array:
+    char txString[8] = {'Z' , zone};
+    pCharacteristic->setValue(txString);
+    
+    pCharacteristic->notify(); // Send the value to the app!
+    Serial.print("*** Sent Value: ");
+    Serial.print(txString);
+    Serial.println(" ***");
+
+  }
+}
 
 static void notifyCallback(
     BLERemoteCharacteristic *pBLERemoteCharacteristic,
@@ -63,6 +137,7 @@ static void notifyCallback(
     prev = Z_0;
     Serial.println("ZONE 0!");
     digitalWrite(ledPin, HIGH);
+    phoneZoneNotify(0);
   }
   else if (pData[1] > T_0 && pData[1] <= (T_1 - 5) && prev != Z_1)
   {
@@ -77,6 +152,7 @@ static void notifyCallback(
     digitalWrite(ledPin, LOW);
     delay(200);
     digitalWrite(ledPin, HIGH);
+    phoneZoneNotify(1);
   }
   else if (pData[1] > T_1 && pData[1] <= (T_2 - 5) && prev != Z_2)
   {
@@ -95,6 +171,7 @@ static void notifyCallback(
     digitalWrite(ledPin, LOW);
     delay(200);
     digitalWrite(ledPin, HIGH);
+    phoneZoneNotify(2);
   }
   else if (pData[1] > T_2 && prev != Z_3)
   {
@@ -117,6 +194,7 @@ static void notifyCallback(
     digitalWrite(ledPin, LOW);
     delay(200);
     digitalWrite(ledPin, HIGH);
+    phoneZoneNotify(3);
   }
 }
 
@@ -214,7 +292,7 @@ void setup()
 {
   Serial.begin(115200);
   Serial.println("Starting Arduino BLE Client application...");
-  BLEDevice::init("");
+  BLEDevice::init("DYI FAN");
   // Set all relays to off when the program starts - if set to Normally Open (NO), the relay is off when you set the relay to HIGH
   for (int i = 1; i <= NUM_RELAYS; i++)
   {
@@ -229,6 +307,36 @@ void setup()
     }
   }
   pinMode(ledPin, OUTPUT);
+
+  // Create the BLE Server
+  BLEServer *pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new PhoneConnection());
+
+  // Create the BLE Service
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  // Create a BLE Characteristic
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID_TX,
+                      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+                    );
+                      
+  pCharacteristic->addDescriptor(new BLE2902());
+  pCharacteristic->setCallbacks(new PhoneCallbacks());
+
+  pRecCharacteristic = pService->createCharacteristic(
+                                         CHARACTERISTIC_UUID_RX,
+                                         BLECharacteristic::PROPERTY_WRITE
+                                       );
+
+  pRecCharacteristic->setCallbacks(new PhoneCallbacks());
+
+  // Start the service
+  pService->start();
+
+  // Start advertising
+  pServer->getAdvertising()->start();
+  Serial.println("Waiting a client connection to notify...");
 } // End of setup.
 
 // This is the Arduino main loop function.
