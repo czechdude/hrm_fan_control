@@ -2,7 +2,9 @@
  * A modified BLE client that will read BLE HRM, Forerunner and Fenix broadcasting HR 
  * and control a relay
  * author Andrew Grabbs, Petr Divis
- * added led to signal connected HRM (led with 1000 Ohm resistor to GPIO and GND of 3V3)
+ * added led to signal connected HRM (led with 1000 Ohm resistor to GPIO 19 and GND of 3V3)
+ * added phoneapp to control and save zones, restart, force on or force off
+ * connectable app on thunkable: https://x.thunkable.com/projects/60102042affe2300113f3b38
  */
 
 #include "Arduino.h"
@@ -13,25 +15,29 @@
 #include <iostream>
 #include <sstream>
 #include <vector>
+#include <Preferences.h>
 
+Preferences preferences;
 // Set to true to define Relay as Normally Open (NO)
 #define RELAY_NO true
 
 // Set number of relays
 #define NUM_RELAYS 3
 
-#define Z_00 -1
+#define Z_ON -1
+#define Z_OFF -2
 #define Z_0 0
 #define Z_1 1
 #define Z_2 2
 #define Z_3 3
 
 // Heart Rate Tresholds
-int T_0 = 110; // start fan from 110 bpm
-int T_1 = 150; // enter second speed at 150 bpm
-int T_2 = 160; // enter third speed at 160 bpm
+unsigned int T_0 = 110; // start fan from 110 bpm
+unsigned int T_1 = 150; // enter second speed at 150 bpm
+unsigned int T_2 = 160; // enter third speed at 160 bpm
 
 bool forceOn = false;
+bool forceOff = false;
 
 
 // Assign each GPIO to a relay
@@ -95,14 +101,19 @@ class PhoneCallbacks: public BLECharacteristicCallbacks {
         // Do stuff based on the command received from the app
         if (rxValue.find("ON") != -1) { 
           Serial.println("Turning ON!");
-          forceOn = true;
+          forceOn = !forceOn;
         }
         if (rxValue.find("OFF") != -1) { 
           Serial.println("Turning OFF!");
-          forceOn = false;
+          forceOff = !forceOff;
+        }
+        if (rxValue.find("RESTART") != -1) { 
+          Serial.println("RestRTING!");
+          ESP.restart();
         }
         if (rxValue.find("*") != -1) { 
           forceOn = false;
+          forceOff = false;
           std::vector<int> result;
           std::stringstream ss (rxValue);
           std::string item;
@@ -113,6 +124,11 @@ class PhoneCallbacks: public BLECharacteristicCallbacks {
           T_0 = result[0];
           T_1 = result[1];
           T_2 = result[2];
+          preferences.begin("diyfan", false);
+          preferences.putUInt("T_0", T_0);
+          preferences.putUInt("T_1", T_1);
+          preferences.putUInt("T_2", T_2);
+          preferences.end();
         }
 
         Serial.println();
@@ -149,15 +165,25 @@ static void notifyCallback(
 
   hr = pData[1];
 
-  if (forceOn) {
+
+  if (forceOff) {
+    for (int i = 1; i <= NUM_RELAYS; i++)
+    {
+      digitalWrite(relayGPIOs[i - 1], HIGH);
+    }
+    prev = Z_OFF;
+    Serial.println("ZONE OFF!");
+    phoneZoneNotify(Z_OFF,hr);
+  }
+  else if (forceOn) {
     for (int i = 1; i <= NUM_RELAYS; i++)
     {
       digitalWrite(relayGPIOs[i - 1], HIGH);
     }
     digitalWrite(relayGPIOs[2], LOW);
-    prev = Z_00;
-    Serial.println("ZONE 00!");
-    phoneZoneNotify(-1,hr);
+    prev = Z_ON;
+    Serial.println("ZONE ON!");
+    phoneZoneNotify(Z_ON,hr);
   }
   else if (pData[1] <= (T_0 - 5) && prev != Z_0)
   {
@@ -168,7 +194,7 @@ static void notifyCallback(
     prev = Z_0;
     Serial.println("ZONE 0!");
     digitalWrite(ledPin, HIGH);
-    phoneZoneNotify(0,hr);
+    phoneZoneNotify(Z_0,hr);
   }
   else if (pData[1] > T_0 && pData[1] <= (T_1 - 5) && prev != Z_1)
   {
@@ -183,7 +209,7 @@ static void notifyCallback(
     digitalWrite(ledPin, LOW);
     delay(200);
     digitalWrite(ledPin, HIGH);
-    phoneZoneNotify(1,hr);
+    phoneZoneNotify(Z_1,hr);
   }
   else if (pData[1] > T_1 && pData[1] <= (T_2 - 5) && prev != Z_2)
   {
@@ -202,7 +228,7 @@ static void notifyCallback(
     digitalWrite(ledPin, LOW);
     delay(200);
     digitalWrite(ledPin, HIGH);
-    phoneZoneNotify(2,hr);
+    phoneZoneNotify(Z_2,hr);
   }
   else if (pData[1] > T_2 && prev != Z_3)
   {
@@ -225,7 +251,7 @@ static void notifyCallback(
     digitalWrite(ledPin, LOW);
     delay(200);
     digitalWrite(ledPin, HIGH);
-    phoneZoneNotify(3,hr);
+    phoneZoneNotify(Z_3,hr);
   }
 }
 
@@ -243,6 +269,7 @@ class MyClientCallback : public BLEClientCallbacks
       digitalWrite(relayGPIOs[i - 1], HIGH);
     }
     prev = -1;
+    hr = 0;
     connected = false;
     doScan = true;
     Serial.println("onDisconnect");
@@ -323,6 +350,13 @@ void setup()
 {
   Serial.begin(115200);
   Serial.println("Starting Arduino BLE Client application...");
+
+  preferences.begin("diyfan", true);
+  T_0 = preferences.getUInt("T_0", 110);
+  T_1 = preferences.getUInt("T_1", 150);
+  T_2 = preferences.getUInt("T_2", 160);
+  preferences.end();
+
   BLEDevice::init("DYI FAN");
   // Set all relays to off when the program starts - if set to Normally Open (NO), the relay is off when you set the relay to HIGH
   for (int i = 1; i <= NUM_RELAYS; i++)
