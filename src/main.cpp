@@ -39,7 +39,6 @@ unsigned int T_2 = 160; // enter third speed at 160 bpm
 bool forceOn = false;
 bool forceOff = false;
 
-
 // Assign each GPIO to a relay
 uint8_t relayGPIOs[NUM_RELAYS] = {25, 26, 27};
 //LEDGPIO
@@ -51,105 +50,135 @@ static BLEUUID serviceUUID("0000180d-0000-1000-8000-00805f9b34fb");
 static BLEUUID charUUID(BLEUUID((uint16_t)0x2A37));
 //0x2A37
 
-#define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" // UART service UUID
+#define SERVICE_UUID "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" // UART service UUID
 #define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_TXX "6E400004-B5A3-F393-E0A9-E50E24DCCA9E"
 
 BLECharacteristic *pCharacteristic;
+BLECharacteristic *pCharacteristicX;
 BLECharacteristic *pRecCharacteristic;
 static bool phoneConnected = false;
 static short prev = 0;
 static uint8_t hr = 0;
 static boolean doConnect = false;
 static boolean connected = false;
-static boolean notification = false;
 static boolean doScan = true;
 static BLERemoteCharacteristic *pRemoteCharacteristic;
 static BLEAdvertisedDevice *myDevice;
 static BLEScan *pBLEScan;
 static BLEServer *pServer;
 
-class PhoneConnection: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) {
-      phoneConnected = true;
-    };
+class PhoneConnection : public BLEServerCallbacks
+{
+  void onConnect(BLEServer *pServer)
+  {
+    phoneConnected = true;
+    Serial.println("Phone connected");
+  };
 
-    void onDisconnect(BLEServer* pServer) {
-      phoneConnected = false;
-    }
+  void onDisconnect(BLEServer *pServer)
+  {
+    phoneConnected = false;
+    Serial.println("Phone disconnected");
+
+  }
 };
 
-class PhoneCallbacks: public BLECharacteristicCallbacks {
-  void onRead(BLECharacteristic *pCharacteristic) {
-    char * txString = (char *)malloc(128);
+
+class PhoneCallbacksX : public BLECharacteristicCallbacks
+{
+  void onRead(BLECharacteristic *pCharacteristic)
+  {
+    char *txString = (char *)malloc(128);
+    snprintf(txString, 128, "%u*%u*%u", T_0, T_1,T_2);
+    pCharacteristic->setValue(txString);
+  }
+
+};
+
+class PhoneCallbacks : public BLECharacteristicCallbacks
+{
+  void onRead(BLECharacteristic *pCharacteristic)
+  {
+    char *txString = (char *)malloc(128);
     snprintf(txString, 128, "Z %d %u bpm", prev, hr);
     pCharacteristic->setValue(txString);
   }
-    void onWrite(BLECharacteristic *pCharacteristic) {
-      std::string rxValue = pCharacteristic->getValue();
+  void onWrite(BLECharacteristic *pCharacteristic)
+  {
+    std::string rxValue = pCharacteristic->getValue();
 
-      if (rxValue.length() > 0) {
-        Serial.println("*********");
-        Serial.print("Received Value: ");
+    if (rxValue.length() > 0)
+    {
+      Serial.println("*********");
+      Serial.print("Received Value: ");
 
-        for (int i = 0; i < rxValue.length(); i++) {
-          Serial.print(rxValue[i]);
-        }
-
-        Serial.println();
-
-        // Do stuff based on the command received from the app
-        if (rxValue.find("ON") != -1) { 
-          Serial.println("Turning ON!");
-          forceOn = !forceOn;
-        }
-        if (rxValue.find("OFF") != -1) { 
-          Serial.println("Turning OFF!");
-          forceOff = !forceOff;
-        }
-        if (rxValue.find("RESTART") != -1) { 
-          Serial.println("RestRTING!");
-          ESP.restart();
-        }
-        if (rxValue.find("*") != -1) { 
-          forceOn = false;
-          forceOff = false;
-          std::vector<int> result;
-          std::stringstream ss (rxValue);
-          std::string item;
-
-          while (std::getline (ss, item, '*')) {
-              result.push_back (atoi( item.c_str() ));
-          }
-          T_0 = result[0];
-          T_1 = result[1];
-          T_2 = result[2];
-          preferences.begin("diyfan", false);
-          preferences.putUInt("T_0", T_0);
-          preferences.putUInt("T_1", T_1);
-          preferences.putUInt("T_2", T_2);
-          preferences.end();
-        }
-
-        Serial.println();
-        Serial.println("*********");
+      for (int i = 0; i < rxValue.length(); i++)
+      {
+        Serial.print(rxValue[i]);
       }
+
+      Serial.println();
+
+      // Do stuff based on the command received from the app
+      if (rxValue.find("ON") != -1)
+      {
+        Serial.println("Turning ON!");
+        forceOn = !forceOn;
+      }
+      if (rxValue.find("OFF") != -1)
+      {
+        Serial.println("Turning OFF!");
+        forceOff = !forceOff;
+      }
+      if (rxValue.find("RESTART") != -1)
+      {
+        Serial.println("RestRTING!");
+        ESP.restart();
+      }
+      if (rxValue.find("*") != -1)
+      {
+        forceOn = false;
+        forceOff = false;
+        std::vector<int> result;
+        std::stringstream ss(rxValue);
+        std::string item;
+
+        while (std::getline(ss, item, '*'))
+        {
+          result.push_back(atoi(item.c_str()));
+        }
+        T_0 = result[0];
+        T_1 = result[1];
+        T_2 = result[2];
+        preferences.begin("diyfan", false);
+        preferences.putUInt("T_0", T_0);
+        preferences.putUInt("T_1", T_1);
+        preferences.putUInt("T_2", T_2);
+        preferences.end();
+      }
+
+      Serial.println();
+      Serial.println("*********");
     }
+  }
 };
 
-static void phoneZoneNotify(int zone, uint8_t hr){
+static void phoneZoneNotify(int zone, uint8_t hr)
+{
   // notify on zone
-  if (phoneConnected) {
+  if (phoneConnected)
+  {
 
-    char * txString = (char *)malloc(128);
+    char *txString = (char *)malloc(128);
     snprintf(txString, 128, "Z %d %u bpm", zone, hr);
     pCharacteristic->setValue(txString);
-    
+
     pCharacteristic->notify(); // Send the value to the app!
     Serial.print("*** Sent Value: ");
     Serial.print(txString);
     Serial.println(" ***");
-
   }
 }
 
@@ -164,101 +193,13 @@ static void notifyCallback(
   Serial.println("bpm");
 
   hr = pData[1];
-
-
-  if (forceOff) {
-    for (int i = 1; i <= NUM_RELAYS; i++)
-    {
-      digitalWrite(relayGPIOs[i - 1], HIGH);
-    }
-    prev = Z_OFF;
-    Serial.println("ZONE OFF!");
-    phoneZoneNotify(Z_OFF,hr);
-  }
-  else if (forceOn) {
-    for (int i = 1; i <= NUM_RELAYS; i++)
-    {
-      digitalWrite(relayGPIOs[i - 1], HIGH);
-    }
-    digitalWrite(relayGPIOs[2], LOW);
-    prev = Z_ON;
-    Serial.println("ZONE ON!");
-    phoneZoneNotify(Z_ON,hr);
-  }
-  else if (pData[1] <= (T_0 - 5) && prev != Z_0)
-  {
-    for (int i = 1; i <= NUM_RELAYS; i++)
-    {
-      digitalWrite(relayGPIOs[i - 1], HIGH);
-    }
-    prev = Z_0;
-    Serial.println("ZONE 0!");
-    digitalWrite(ledPin, HIGH);
-    phoneZoneNotify(Z_0,hr);
-  }
-  else if (pData[1] > T_0 && pData[1] <= (T_1 - 5) && prev != Z_1)
-  {
-
-    for (int i = 1; i <= NUM_RELAYS; i++)
-    {
-      digitalWrite(relayGPIOs[i - 1], HIGH);
-    }
-    digitalWrite(relayGPIOs[0], LOW);
-    prev = Z_1;
-    Serial.println("ZONE 1!");
-    digitalWrite(ledPin, LOW);
-    delay(200);
-    digitalWrite(ledPin, HIGH);
-    phoneZoneNotify(Z_1,hr);
-  }
-  else if (pData[1] > T_1 && pData[1] <= (T_2 - 5) && prev != Z_2)
-  {
-
-    for (int i = 1; i <= NUM_RELAYS; i++)
-    {
-      digitalWrite(relayGPIOs[i - 1], HIGH);
-    }
-    digitalWrite(relayGPIOs[1], LOW);
-    prev = Z_2;
-    Serial.println("ZONE 2!");
-    digitalWrite(ledPin, LOW);
-    delay(200);
-    digitalWrite(ledPin, HIGH);
-    delay(200);
-    digitalWrite(ledPin, LOW);
-    delay(200);
-    digitalWrite(ledPin, HIGH);
-    phoneZoneNotify(Z_2,hr);
-  }
-  else if (pData[1] > T_2 && prev != Z_3)
-  {
-
-    for (int i = 1; i <= NUM_RELAYS; i++)
-    {
-      digitalWrite(relayGPIOs[i - 1], HIGH);
-    }
-    digitalWrite(relayGPIOs[2], LOW);
-    prev = Z_3;
-    Serial.println("ZONE 3!");
-    digitalWrite(ledPin, LOW);
-    delay(200);
-    digitalWrite(ledPin, HIGH);
-    delay(200);
-    digitalWrite(ledPin, LOW);
-    delay(200);
-    digitalWrite(ledPin, HIGH);
-    delay(200);
-    digitalWrite(ledPin, LOW);
-    delay(200);
-    digitalWrite(ledPin, HIGH);
-    phoneZoneNotify(Z_3,hr);
-  }
 }
 
 class MyClientCallback : public BLEClientCallbacks
 {
   void onConnect(BLEClient *pclient)
   {
+    digitalWrite(ledPin, HIGH);
   }
 
   void onDisconnect(BLEClient *pclient)
@@ -287,7 +228,14 @@ bool connectToServer()
   pClient->setClientCallbacks(new MyClientCallback());
 
   // Connect to the remove BLE Server.
-  pClient->connect(myDevice); // if you pass BLEAdvertisedDevice instead of address, it will be recognized type of peer device address (public or private)
+  if (!pClient->connect(myDevice))
+  {
+    prev = -1;
+    hr = 0;
+    connected = false;
+    doScan = true;
+    return false;
+  } // if you pass BLEAdvertisedDevice instead of address, it will be recognized type of peer device address (public or private)
   Serial.println(" - Connected to server");
 
   // Obtain a reference to the service we are after in the remote BLE server.
@@ -312,7 +260,12 @@ bool connectToServer()
   }
   Serial.println(" - Found our characteristic");
   if (pRemoteCharacteristic->canNotify())
+  {
     pRemoteCharacteristic->registerForNotify(notifyCallback);
+    Serial.println("Turning Notification On");
+    const uint8_t onPacket[] = {0x01, 0x0};
+    pRemoteCharacteristic->getDescriptor(BLEUUID((uint16_t)0x2902))->writeValue((uint8_t *)onPacket, 2, true);
+  }
   connected = true;
   return true;
 }
@@ -338,11 +291,7 @@ class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks
       doConnect = true;
       doScan = false;
 
-    } // Found our server
-    else
-    {
-      Serial.println("No service available");
-    }
+    } 
   } // onResult
 };  // MyAdvertisedDeviceCallbacks
 
@@ -382,17 +331,20 @@ void setup()
 
   // Create a BLE Characteristic
   pCharacteristic = pService->createCharacteristic(
-                      CHARACTERISTIC_UUID_TX,
-                      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
-                    );
-                      
+      CHARACTERISTIC_UUID_TX,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+
   pCharacteristic->addDescriptor(new BLE2902());
   pCharacteristic->setCallbacks(new PhoneCallbacks());
 
+  pCharacteristicX = pService->createCharacteristic(
+      CHARACTERISTIC_UUID_TXX,
+      BLECharacteristic::PROPERTY_READ);
+  pCharacteristicX->setCallbacks(new PhoneCallbacksX());
+
   pRecCharacteristic = pService->createCharacteristic(
-                                         CHARACTERISTIC_UUID_RX,
-                                         BLECharacteristic::PROPERTY_WRITE
-                                       );
+      CHARACTERISTIC_UUID_RX,
+      BLECharacteristic::PROPERTY_WRITE);
 
   pRecCharacteristic->setCallbacks(new PhoneCallbacks());
 
@@ -412,30 +364,13 @@ void loop()
   // connected we set the connected flag to be true.
   if (doConnect == true)
   {
-    if (connectToServer())
-    {
-      Serial.println("We are now connected to the BLE Server.");
-    }
-    else
-    {
-      Serial.println("We have failed to connect to the server; there is nothin more we will do.");
-    }
+    connectToServer();
     doConnect = false;
   }
 
   // If we are connected to a peer BLE Server, update the characteristic each time we are reached
   // with the current time since boot.
-  if (connected)
-  {
-    if (notification == false)
-    {
-      Serial.println("Turning Notification On");
-      const uint8_t onPacket[] = {0x01, 0x0};
-      pRemoteCharacteristic->getDescriptor(BLEUUID((uint16_t)0x2902))->writeValue((uint8_t *)onPacket, 2, true);
-      notification = true;
-    }
-  }
-  else if (doScan)
+  if (!connected && doScan)
   {
     Serial.println("Rescanning");
     pBLEScan = BLEDevice::getScan();
@@ -444,11 +379,78 @@ void loop()
     pBLEScan->setWindow(449);
     pBLEScan->setActiveScan(true);
     pBLEScan->start(5, false);
-    notification = false;
   }
-  if(!phoneConnected){
+  if (!phoneConnected)
+  {
     pServer->getAdvertising()->start();
   }
 
+  if (forceOff)
+  {
+    for (int i = 1; i <= NUM_RELAYS; i++)
+    {
+      digitalWrite(relayGPIOs[i - 1], HIGH);
+    }
+    prev = Z_OFF;
+    Serial.println("ZONE OFF!");
+    phoneZoneNotify(Z_OFF, hr);
+  }
+  else if (forceOn)
+  {
+    for (int i = 1; i <= NUM_RELAYS; i++)
+    {
+      digitalWrite(relayGPIOs[i - 1], HIGH);
+    }
+    digitalWrite(relayGPIOs[2], LOW);
+    prev = Z_ON;
+    Serial.println("ZONE ON!");
+    phoneZoneNotify(Z_ON, hr);
+  }
+  else if (hr <= (T_0 - 5) && prev != Z_0)
+  {
+    for (int i = 1; i <= NUM_RELAYS; i++)
+    {
+      digitalWrite(relayGPIOs[i - 1], HIGH);
+    }
+    prev = Z_0;
+    Serial.println("ZONE 0!");
+    phoneZoneNotify(Z_0, hr);
+  }
+  else if (hr > T_0 && hr <= (T_1 - 5) && prev != Z_1)
+  {
+
+    for (int i = 1; i <= NUM_RELAYS; i++)
+    {
+      digitalWrite(relayGPIOs[i - 1], HIGH);
+    }
+    digitalWrite(relayGPIOs[0], LOW);
+    prev = Z_1;
+    Serial.println("ZONE 1!");
+    phoneZoneNotify(Z_1, hr);
+  }
+  else if (hr > T_1 && hr <= (T_2 - 5) && prev != Z_2)
+  {
+
+    for (int i = 1; i <= NUM_RELAYS; i++)
+    {
+      digitalWrite(relayGPIOs[i - 1], HIGH);
+    }
+    digitalWrite(relayGPIOs[1], LOW);
+    prev = Z_2;
+    Serial.println("ZONE 2!");
+    phoneZoneNotify(Z_2, hr);
+  }
+  else if (hr > T_2 && prev != Z_3)
+  {
+
+    for (int i = 1; i <= NUM_RELAYS; i++)
+    {
+      digitalWrite(relayGPIOs[i - 1], HIGH);
+    }
+    digitalWrite(relayGPIOs[2], LOW);
+    prev = Z_3;
+    Serial.println("ZONE 3!");
+    phoneZoneNotify(Z_3, hr);
+  }
   delay(1000); // Delay a second between loops.
 } // End of loop
