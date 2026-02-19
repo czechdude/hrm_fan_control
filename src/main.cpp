@@ -1,7 +1,7 @@
 /**
  * BLE Heart Rate Monitor Fan Control with WiFi Web Interface
  * Reads BLE HRM (Forerunner, Fenix, etc.) and controls fan relays based on heart rate zones
- * Features: WiFi AP mode, Web dashboard, OTA updates, real-time debugging
+ * Features: WiFi AP mode, Web dashboard, real-time debugging
  * author Andrew Grabbs, Petr Divis
  */
 
@@ -13,9 +13,7 @@
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <ESPAsyncWiFiManager.h>
-#include <ArduinoOTA.h>
 #include <ArduinoJson.h>
-#include <Update.h>
 #include <vector>
 #include <sstream>
 
@@ -60,9 +58,6 @@ static boolean justConnected = false; // Flag to initialize zone on first HR rea
 static BLERemoteCharacteristic *pRemoteCharacteristic;
 static BLEAdvertisedDevice *myDevice;
 static BLEScan *pBLEScan;
-
-// FreeRTOS task handle for BLE operations
-TaskHandle_t BLETaskHandle = NULL;
 
 // Web server and WiFi
 AsyncWebServer server(80);
@@ -132,6 +127,7 @@ class MyClientCallback : public BLEClientCallbacks
     doScan = true;
     justConnected = false;
     addLog("HRM Disconnected - rescanning");
+    broadcastStatus(); // Update UI with disconnected status
   }
 };
 
@@ -180,6 +176,7 @@ bool connectToServer()
   }
   
   connected = true;
+  broadcastStatus(); // Update UI with connected status
   return true;
 }
 // BLE scan callback
@@ -210,7 +207,8 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
                        ",\"T_1\":" + String(T_1) +
                        ",\"T_2\":" + String(T_2) +
                        ",\"mode\":\"" + String(controlMode == MODE_AUTOMATIC ? "automatic" : "manual") + "\"" +
-                       ",\"manualZone\":" + String(manualZone) + "}";
+                       ",\"manualZone\":" + String(manualZone) +
+                       ",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
     client->text(statusMsg);
     
     // Send log history
@@ -264,6 +262,13 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
           }
         } else if (cmd == "restart") {
           addLog("Restarting ESP32...");
+          delay(500);
+          ESP.restart();
+        } else if (cmd == "resetSettings") {
+          addLog("Resetting all settings to defaults...");
+          preferences.begin("diyfan", false);
+          preferences.clear();
+          preferences.end();
           delay(500);
           ESP.restart();
         } else if (cmd == "setThresholds") {
@@ -475,7 +480,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 
             <div class="control-section">
                 <h3>System</h3>
-                <button onclick="location.href='/update'" class="warning">OTA Update</button>
+                <button onclick="resetSettings()" class="warning">Reset Settings</button>
                 <button onclick="restartDevice()" class="danger">Restart Device</button>
             </div>
         </div>
@@ -518,6 +523,7 @@ const char index_html[] PROGMEM = R"rawliteral(
                     document.getElementById('t0').value = data.T_0;
                     document.getElementById('t1').value = data.T_1;
                     document.getElementById('t2').value = data.T_2;
+                    if (data.ip) document.getElementById('ipAddress').textContent = data.ip;
                     updateRelayDisplay(data.zone);
                     updateModeUI(data.mode, data.manualZone);
                 } else if (data.type === 'log') {
@@ -605,6 +611,14 @@ const char index_html[] PROGMEM = R"rawliteral(
             }
         }
         
+        function resetSettings() {
+            if (confirm('Reset all settings to defaults? This will restart the device.')) {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({cmd: 'resetSettings'}));
+                }
+            }
+        }
+        
         function addConsoleLog(msg) {
             let console = document.getElementById('console');
             let line = document.createElement('div');
@@ -629,13 +643,6 @@ const char index_html[] PROGMEM = R"rawliteral(
                 seconds + 's';
         }
         
-        // Fetch IP address
-        fetch('/api/ip')
-            .then(r => r.json())
-            .then(data => {
-                document.getElementById('ipAddress').textContent = data.ip;
-            });
-        
         // Connect WebSocket and start uptime timer
         connect();
         setInterval(updateUptime, 1000);
@@ -654,7 +661,6 @@ const char index_html[] PROGMEM = R"rawliteral(
 void setup()
 {
   Serial.begin(115200);
-  disableCore0WDT(); // Disable watchdog timer to prevent resets during BLE operations
   Serial.println("\n\nStarting HRM Fan Control with WiFi...");
   
   // Load preferences
@@ -710,39 +716,6 @@ void setup()
   // Initialize BLE
   BLEDevice::init("HRM Fan Control");
   
-  // Setup OTA
-  ArduinoOTA.setHostname("hrm-fan-control");
-  ArduinoOTA.setPassword("admin"); // Change this password!
-  
-  ArduinoOTA.onStart([]() {
-    String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
-    Serial.println("Start updating " + type);
-    addLog("OTA Update started: " + type);
-  });
-  
-  ArduinoOTA.onEnd([]() {
-    Serial.println("\nEnd");
-    addLog("OTA Update completed");
-  });
-  
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-  });
-  
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("Error[%u]: ", error);
-    String err = "OTA Error: ";
-    if (error == OTA_AUTH_ERROR) err += "Auth Failed";
-    else if (error == OTA_BEGIN_ERROR) err += "Begin Failed";
-    else if (error == OTA_CONNECT_ERROR) err += "Connect Failed";
-    else if (error == OTA_RECEIVE_ERROR) err += "Receive Failed";
-    else if (error == OTA_END_ERROR) err += "End Failed";
-    addLog(err);
-  });
-  
-  ArduinoOTA.begin();
-  Serial.println("OTA ready");
-  
   // Setup WebSocket
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);
@@ -752,312 +725,39 @@ void setup()
     request->send(200, "text/html", index_html);
   });
   
-  server.on("/api/ip", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String json = "{\"ip\":\"" + WiFi.localIP().toString() + "\"}";
-    request->send(200, "application/json", json);
-  });
-  
-  server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request) {
-    JsonDocument doc;
-    doc["hr"] = hr;
-    doc["zone"] = prev;
-    doc["connected"] = connected;
-    doc["T_0"] = T_0;
-    doc["T_1"] = T_1;
-    doc["T_2"] = T_2;
-    doc["mode"] = (controlMode == MODE_AUTOMATIC) ? "automatic" : "manual";
-    doc["manualZone"] = manualZone;
-    doc["uptime"] = millis();
-    doc["ip"] = WiFi.localIP().toString();
-    
-    String json;
-    serializeJson(doc, json);
-    request->send(200, "application/json", json);
-  });
-  
-  // OTA update page - web-based firmware upload
-  server.on("/update", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String html = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Firmware Update</title>
-    <style>
-        body { 
-            font-family: Arial, sans-serif; 
-            margin: 20px; 
-            background: #1a1a1a; 
-            color: #fff; 
-        }
-        .container { 
-            max-width: 600px; 
-            margin: 0 auto; 
-            background: #2d2d2d; 
-            padding: 30px; 
-            border-radius: 8px; 
-        }
-        h1 { color: #4CAF50; }
-        .info { 
-            background: #3d3d3d; 
-            padding: 15px; 
-            border-radius: 4px; 
-            margin: 20px 0; 
-        }
-        input[type="file"] { 
-            margin: 20px 0; 
-            padding: 10px; 
-            background: #3d3d3d; 
-            border: 1px solid #555; 
-            color: #fff; 
-            width: 100%; 
-            border-radius: 4px; 
-        }
-        button { 
-            background: #4CAF50; 
-            color: white; 
-            border: none; 
-            padding: 12px 24px; 
-            border-radius: 4px; 
-            cursor: pointer; 
-            margin: 5px; 
-            font-size: 16px; 
-            width: 100%; 
-        }
-        button:hover { background: #45a049; }
-        button:disabled { background: #666; cursor: not-allowed; }
-        .progress { 
-            width: 100%; 
-            height: 30px; 
-            background: #3d3d3d; 
-            border-radius: 4px; 
-            margin: 20px 0; 
-            overflow: hidden; 
-            display: none; 
-        }
-        .progress-bar { 
-            height: 100%; 
-            background: #4CAF50; 
-            width: 0%; 
-            transition: width 0.3s; 
-            text-align: center; 
-            line-height: 30px; 
-        }
-        .status { 
-            margin: 20px 0; 
-            padding: 15px; 
-            border-radius: 4px; 
-            display: none; 
-        }
-        .status.success { background: #4CAF50; }
-        .status.error { background: #f44336; }
-        a { color: #4CAF50; text-decoration: none; }
-        a:hover { text-decoration: underline; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🔄 Firmware Update</h1>
-        <div class="info">
-            <p><strong>Current IP:</strong> )rawliteral" + WiFi.localIP().toString() + R"rawliteral(</p>
-            <p><strong>File Location:</strong> .pio\build\esp32dev\firmware.bin</p>
-            <p><strong>Upload Method:</strong> Web Upload</p>
-        </div>
-        
-        <form id="uploadForm">
-            <label for="firmware"><strong>Select Firmware File (.bin):</strong></label>
-            <input type="file" id="firmware" name="firmware" accept=".bin" required>
-            <button type="submit" id="uploadBtn">Upload Firmware</button>
-        </form>
-        
-        <div class="progress" id="progressDiv">
-            <div class="progress-bar" id="progressBar">0%</div>
-        </div>
-        
-        <div class="status" id="status"></div>
-        
-        <p style="margin-top: 30px;"><a href="/">← Back to Dashboard</a></p>
-    </div>
-
-    <script>
-        const form = document.getElementById('uploadForm');
-        const uploadBtn = document.getElementById('uploadBtn');
-        const progressDiv = document.getElementById('progressDiv');
-        const progressBar = document.getElementById('progressBar');
-        const status = document.getElementById('status');
-        
-        form.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            
-            const fileInput = document.getElementById('firmware');
-            const file = fileInput.files[0];
-            
-            if (!file) {
-                showStatus('Please select a firmware file!', 'error');
-                return;
-            }
-            
-            uploadBtn.disabled = true;
-            uploadBtn.textContent = 'Uploading...';
-            progressDiv.style.display = 'block';
-            status.style.display = 'none';
-            
-            const xhr = new XMLHttpRequest();
-            
-            xhr.upload.addEventListener('progress', (e) => {
-                if (e.lengthComputable) {
-                    const percentComplete = Math.round((e.loaded / e.total) * 100);
-                    progressBar.style.width = percentComplete + '%';
-                    progressBar.textContent = percentComplete + '%';
-                }
-            });
-            
-            xhr.addEventListener('load', () => {
-                if (xhr.status === 200) {
-                    showStatus('✅ Firmware uploaded successfully! Device is restarting...', 'success');
-                    setTimeout(() => {
-                        window.location.href = '/';
-                    }, 5000);
-                } else {
-                    showStatus('❌ Upload failed: ' + xhr.responseText, 'error');
-                    uploadBtn.disabled = false;
-                    uploadBtn.textContent = 'Upload Firmware';
-                }
-            });
-            
-            xhr.addEventListener('error', () => {
-                showStatus('❌ Upload error! Check console for details.', 'error');
-                uploadBtn.disabled = false;
-                uploadBtn.textContent = 'Upload Firmware';
-            });
-            
-            xhr.open('POST', '/update', true);
-            xhr.send(file);
-        });
-        
-        function showStatus(message, type) {
-            status.textContent = message;
-            status.className = 'status ' + type;
-            status.style.display = 'block';
-        }
-    </script>
-</body>
-</html>
-)rawliteral";
-    request->send(200, "text/html", html);
-  });
-  
-  // Handle firmware upload
-  server.on("/update", HTTP_POST, 
-    [](AsyncWebServerRequest *request) {
-      bool shouldReboot = !Update.hasError();
-      AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", 
-        shouldReboot ? "OK" : "FAIL");
-      response->addHeader("Connection", "close");
-      request->send(response);
-      if (shouldReboot) {
-        addLog("Firmware updated successfully, rebooting...");
-        delay(1000);
-        ESP.restart();
-      }
-    },
-    [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
-      if (!index) {
-        Serial.printf("Update Start: %s\n", filename.c_str());
-        addLog("Starting firmware update: " + filename);
-        
-        // Stop BLE scanning during update to free resources
-        if (pBLEScan != nullptr) {
-          pBLEScan->stop();
-        }
-        doScan = false;
-        
-        if (!Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000)) {
-          Update.printError(Serial);
-        }
-      }
-      if (!Update.hasError()) {
-        if (Update.write(data, len) != len) {
-          Update.printError(Serial);
-        }
-      }
-      if (final) {
-        if (Update.end(true)) {
-          Serial.printf("Update Success: %uB\n", index + len);
-          addLog("Firmware update completed: " + String(index + len) + " bytes");
-        } else {
-          Update.printError(Serial);
-          addLog("Firmware update FAILED!");
-        }
-      }
-    }
-  );
-  
   server.begin();
   Serial.println("Web server started");
   
   addLog("System initialized - WiFi IP: " + WiFi.localIP().toString());
   addLog("Thresholds: T_0=" + String(T_0) + " T_1=" + String(T_1) + " T_2=" + String(T_2));
-  
-  // Create BLE task on Core 0 (separate from main loop on Core 1)
-  xTaskCreatePinnedToCore(
-    BLETask,           // Task function
-    "BLETask",         // Task name
-    10000,            // Stack size
-    NULL,             // Parameters
-    1,                // Priority
-    &BLETaskHandle,   // Task handle
-    0                 // Core 0 (Core 1 is used by main loop)
-  );
-  addLog("BLE task started on Core 0");
-}
-
-// BLE Task - runs on Core 0, handles BLE scanning and connection
-void BLETask(void *parameter) {
-  while (true) {
-    // Skip BLE operations during firmware update
-    if (Update.isRunning()) {
-      vTaskDelay(100 / portTICK_PERIOD_MS);
-      continue;
-    }
-    
-    // BLE HRM connection management
-    if (doConnect == true) {
-      connectToServer();
-      doConnect = false;
-    }
-
-    if (!connected && doScan) {
-      addLog("Scanning for HRM devices...");
-      pBLEScan = BLEDevice::getScan();
-      pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
-      pBLEScan->setInterval(1349);
-      pBLEScan->setWindow(449);
-      pBLEScan->setActiveScan(true);
-      pBLEScan->start(5, false); // This blocks for 5 seconds
-    }
-    
-    vTaskDelay(1000 / portTICK_PERIOD_MS); // Wait 1 second before next iteration
-  }
 }
 
 void loop()
 {
-  // Handle OTA updates - always first priority
-  ArduinoOTA.handle();
-  
-  // If firmware update is running, skip everything else to avoid interruptions
-  if (Update.isRunning()) {
-    delay(10);
-    return;
+  // Cleanup WebSocket clients periodically (not every loop)
+  static unsigned long lastCleanup = 0;
+  if (millis() - lastCleanup > 10000) { // Every 10 seconds
+    ws.cleanupClients();
+    lastCleanup = millis();
   }
   
-  // Handle WebSocket
-  ws.cleanupClients();
-  
-  // BLE operations now handled by BLETask on Core 0
-  // This keeps the main loop responsive
+  // BLE HRM connection management
+  if (doConnect == true)
+  {
+    connectToServer();
+    doConnect = false;
+  }
+
+  if (!connected && doScan)
+  {
+    addLog("Scanning for HRM devices...");
+    pBLEScan = BLEDevice::getScan();
+    pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+    pBLEScan->setInterval(1349);
+    pBLEScan->setWindow(449);
+    pBLEScan->setActiveScan(true);
+    pBLEScan->start(5, false);
+  }
 
   // Control logic
   if (controlMode == MODE_MANUAL) {
@@ -1167,7 +867,8 @@ void broadcastStatus() {
                      ",\"T_1\":" + String(T_1) +
                      ",\"T_2\":" + String(T_2) +
                      ",\"mode\":\"" + String(controlMode == MODE_AUTOMATIC ? "automatic" : "manual") + "\"" +
-                     ",\"manualZone\":" + String(manualZone) + "}";
+                     ",\"manualZone\":" + String(manualZone) +
+                     ",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
   ws.textAll(statusMsg);
 }
 
