@@ -54,6 +54,7 @@ static uint8_t hr = 0;
 static boolean doConnect = false;
 static boolean connected = false;
 static boolean doScan = true;
+static boolean isScanning = false;  // Async BLE scan in progress
 static boolean justConnected = false; // Flag to initialize zone on first HR reading
 static BLERemoteCharacteristic *pRemoteCharacteristic;
 static BLEAdvertisedDevice *myDevice;
@@ -73,6 +74,7 @@ int logIndex = 0;
 void addLog(String message);
 void broadcastStatus();
 void setZoneForHR(uint8_t heartRate); // Initialize zone based on current HR
+void scanComplete(BLEScanResults results); // Async BLE scan callback
 
 // Function to add log entry
 void addLog(String message) {
@@ -208,7 +210,8 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
                        ",\"T_2\":" + String(T_2) +
                        ",\"mode\":\"" + String(controlMode == MODE_AUTOMATIC ? "automatic" : "manual") + "\"" +
                        ",\"manualZone\":" + String(manualZone) +
-                       ",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+                       ",\"ip\":\"" + WiFi.localIP().toString() +
+                       "\",\"uptime\":" + String(millis() / 1000) + "}";
     client->text(statusMsg);
     
     // Send log history
@@ -463,9 +466,9 @@ const char index_html[] PROGMEM = R"rawliteral(
 
             <div class="control-section" id="autoControls">
                 <h3>Heart Rate Thresholds (Automatic Mode)</h3>
-                <label>T_0 (Start): <input type="number" id="t0" value="110" min="60" max="200"></label>
-                <label>T_1 (Speed 2): <input type="number" id="t1" value="150" min="60" max="200"></label>
-                <label>T_2 (Speed 3): <input type="number" id="t2" value="160" min="60" max="200"></label>
+                <label>T_0 (Start): <input type="number" id="t0" value="110" min="60" max="200" oninput="thresholdsDirty=true"></label>
+                <label>T_1 (Speed 2): <input type="number" id="t1" value="150" min="60" max="200" oninput="thresholdsDirty=true"></label>
+                <label>T_2 (Speed 3): <input type="number" id="t2" value="160" min="60" max="200" oninput="thresholdsDirty=true"></label>
                 <button onclick="updateThresholds()">Update Thresholds</button>
             </div>
 
@@ -494,7 +497,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 
     <script>
         let ws;
-        let startTime = Date.now();
+        let thresholdsDirty = false;
         
         function connect() {
             ws = new WebSocket('ws://' + window.location.hostname + '/ws');
@@ -520,10 +523,13 @@ const char index_html[] PROGMEM = R"rawliteral(
                     document.getElementById('zone').textContent = getZoneName(data.zone);
                     document.getElementById('hrmStatus').textContent = data.connected ? 'Connected' : 'Disconnected';
                     document.getElementById('hrmStatus').style.color = data.connected ? '#4CAF50' : '#f44336';
-                    document.getElementById('t0').value = data.T_0;
-                    document.getElementById('t1').value = data.T_1;
-                    document.getElementById('t2').value = data.T_2;
+                    if (!thresholdsDirty) {
+                        document.getElementById('t0').value = data.T_0;
+                        document.getElementById('t1').value = data.T_1;
+                        document.getElementById('t2').value = data.T_2;
+                    }
                     if (data.ip) document.getElementById('ipAddress').textContent = data.ip;
+                    if (data.uptime !== undefined) document.getElementById('uptime').textContent = formatUptime(data.uptime);
                     updateRelayDisplay(data.zone);
                     updateModeUI(data.mode, data.manualZone);
                 } else if (data.type === 'log') {
@@ -602,6 +608,7 @@ const char index_html[] PROGMEM = R"rawliteral(
                     T_1: t1,
                     T_2: t2
                 }));
+                thresholdsDirty = false;
             }
         }
         
@@ -632,20 +639,15 @@ const char index_html[] PROGMEM = R"rawliteral(
             document.getElementById('console').innerHTML = '';
         }
         
-        function updateUptime() {
-            let elapsed = Math.floor((Date.now() - startTime) / 1000);
-            let hours = Math.floor(elapsed / 3600);
-            let minutes = Math.floor((elapsed % 3600) / 60);
-            let seconds = elapsed % 60;
-            document.getElementById('uptime').textContent = 
-                (hours > 0 ? hours + 'h ' : '') +
-                (minutes > 0 ? minutes + 'm ' : '') +
-                seconds + 's';
+        function formatUptime(seconds) {
+            let h = Math.floor(seconds / 3600);
+            let m = Math.floor((seconds % 3600) / 60);
+            let s = seconds % 60;
+            return (h > 0 ? h + 'h ' : '') + (m > 0 ? m + 'm ' : '') + s + 's';
         }
         
-        // Connect WebSocket and start uptime timer
+        // Connect WebSocket
         connect();
-        setInterval(updateUptime, 1000);
         
         // Periodic status update request
         setInterval(function() {
@@ -732,15 +734,22 @@ void setup()
   addLog("Thresholds: T_0=" + String(T_0) + " T_1=" + String(T_1) + " T_2=" + String(T_2));
 }
 
+void scanComplete(BLEScanResults results) {
+  isScanning = false;
+  if (!connected) {
+    doScan = true; // Schedule rescan if still not connected
+  }
+}
+
 void loop()
 {
-  // Cleanup WebSocket clients periodically (not every loop)
+  // Cleanup WebSocket clients periodically
   static unsigned long lastCleanup = 0;
-  if (millis() - lastCleanup > 10000) { // Every 10 seconds
+  if (millis() - lastCleanup > 10000) {
     ws.cleanupClients();
     lastCleanup = millis();
   }
-  
+
   // BLE HRM connection management
   if (doConnect == true)
   {
@@ -748,114 +757,98 @@ void loop()
     doConnect = false;
   }
 
-  if (!connected && doScan)
+  // Async BLE scan - starts scan and returns immediately, scanComplete() called when done
+  if (!connected && doScan && !isScanning)
   {
+    isScanning = true;
+    doScan = false;
     addLog("Scanning for HRM devices...");
     pBLEScan = BLEDevice::getScan();
     pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
     pBLEScan->setInterval(1349);
     pBLEScan->setWindow(449);
     pBLEScan->setActiveScan(true);
-    pBLEScan->start(5, false);
+    pBLEScan->start(5, scanComplete, false); // Async - returns immediately!
   }
 
-  // Control logic
-  if (controlMode == MODE_MANUAL) {
-    // Manual mode - apply selected zone regardless of HR
-    int targetZone = manualZone;
-    if (prev != targetZone) {
-      // Turn off all relays first
-      for (int i = 0; i < NUM_RELAYS; i++) {
-        digitalWrite(relayGPIOs[i], HIGH);
+  // Control logic - runs every 1 second via millis, no blocking delay
+  static unsigned long lastZoneCheck = 0;
+  if (millis() - lastZoneCheck >= 1000) {
+    lastZoneCheck = millis();
+
+    if (controlMode == MODE_MANUAL) {
+      // Manual mode - apply selected zone regardless of HR
+      int targetZone = manualZone;
+      if (prev != targetZone) {
+        for (int i = 0; i < NUM_RELAYS; i++) {
+          digitalWrite(relayGPIOs[i], HIGH);
+        }
+        if (targetZone == 1) {
+          digitalWrite(relayGPIOs[0], LOW);
+        } else if (targetZone == 2) {
+          digitalWrite(relayGPIOs[1], LOW);
+        } else if (targetZone == 3) {
+          digitalWrite(relayGPIOs[2], LOW);
+        }
+        prev = targetZone;
+        addLog("MANUAL: Zone " + String(targetZone));
+        broadcastStatus();
       }
-      
-      // Turn on appropriate relay for selected zone
-      if (targetZone == 1) {
+    }
+    else if (controlMode == MODE_AUTOMATIC) {
+      // Automatic mode - control based on heart rate
+      // Descending transitions (hysteresis)
+      if (hr <= (T_0 - 5) && prev >= Z_1)
+      {
+        for (int i = 0; i < NUM_RELAYS; i++) digitalWrite(relayGPIOs[i], HIGH);
+        prev = Z_0;
+        addLog("AUTO: ZONE 0 - HR: " + String(hr) + " (descent below " + String(T_0-5) + ")");
+        broadcastStatus();
+      }
+      else if (hr < (T_1 - 5) && prev >= Z_2)
+      {
+        for (int i = 0; i < NUM_RELAYS; i++) digitalWrite(relayGPIOs[i], HIGH);
         digitalWrite(relayGPIOs[0], LOW);
-      } else if (targetZone == 2) {
+        prev = Z_1;
+        addLog("AUTO: ZONE 1 - HR: " + String(hr) + " (descent below " + String(T_1-5) + ")");
+        broadcastStatus();
+      }
+      else if (hr < (T_2 - 5) && prev == Z_3)
+      {
+        for (int i = 0; i < NUM_RELAYS; i++) digitalWrite(relayGPIOs[i], HIGH);
         digitalWrite(relayGPIOs[1], LOW);
-      } else if (targetZone == 3) {
+        prev = Z_2;
+        addLog("AUTO: ZONE 2 - HR: " + String(hr) + " (descent below " + String(T_2-5) + ")");
+        broadcastStatus();
+      }
+      // Ascending transitions
+      else if (hr > T_0 && prev == Z_0)
+      {
+        for (int i = 0; i < NUM_RELAYS; i++) digitalWrite(relayGPIOs[i], HIGH);
+        digitalWrite(relayGPIOs[0], LOW);
+        prev = Z_1;
+        addLog("AUTO: ZONE 1 - HR: " + String(hr) + " (above " + String(T_0) + ")");
+        broadcastStatus();
+      }
+      else if (hr >= T_1 && (prev == Z_0 || prev == Z_1))
+      {
+        for (int i = 0; i < NUM_RELAYS; i++) digitalWrite(relayGPIOs[i], HIGH);
+        digitalWrite(relayGPIOs[1], LOW);
+        prev = Z_2;
+        addLog("AUTO: ZONE 2 - HR: " + String(hr) + " (above " + String(T_1) + ")");
+        broadcastStatus();
+      }
+      else if (hr >= T_2 && prev != Z_3)
+      {
+        for (int i = 0; i < NUM_RELAYS; i++) digitalWrite(relayGPIOs[i], HIGH);
         digitalWrite(relayGPIOs[2], LOW);
+        prev = Z_3;
+        addLog("AUTO: ZONE 3 - HR: " + String(hr) + " (above " + String(T_2) + ")");
+        broadcastStatus();
       }
-      // Zone 0 = all relays off (already done above)
-      
-      prev = targetZone;
-      addLog("MANUAL: Zone " + String(targetZone));
-      broadcastStatus();
     }
   }
-  else if (controlMode == MODE_AUTOMATIC) {
-    // Automatic mode - control based on heart rate
-    // Descending transitions (hysteresis)
-    if (hr <= (T_0 - 5) && prev >= Z_1)
-    {
-      for (int i = 0; i < NUM_RELAYS; i++)
-      {
-        digitalWrite(relayGPIOs[i], HIGH);
-      }
-      prev = Z_0;
-      addLog("AUTO: ZONE 0 - HR: " + String(hr) + " (descent below " + String(T_0-5) + ")");
-      broadcastStatus();
-    }
-    else if (hr < (T_1 - 5) && prev >= Z_2)
-    {
-      for (int i = 0; i < NUM_RELAYS; i++)
-      {
-        digitalWrite(relayGPIOs[i], HIGH);
-      }
-      digitalWrite(relayGPIOs[0], LOW);
-      prev = Z_1;
-      addLog("AUTO: ZONE 1 - HR: " + String(hr) + " (descent below " + String(T_1-5) + ")");
-      broadcastStatus();
-    }
-    else if (hr < (T_2 - 5) && prev == Z_3)
-    {
-      for (int i = 0; i < NUM_RELAYS; i++)
-      {
-        digitalWrite(relayGPIOs[i], HIGH);
-      }
-      digitalWrite(relayGPIOs[1], LOW);
-      prev = Z_2;
-      addLog("AUTO: ZONE 2 - HR: " + String(hr) + " (descent below " + String(T_2-5) + ")");
-      broadcastStatus();
-    }
-    // Ascending transitions
-    else if (hr > T_0 && prev == Z_0)
-    {
-      for (int i = 0; i < NUM_RELAYS; i++)
-      {
-        digitalWrite(relayGPIOs[i], HIGH);
-      }
-      digitalWrite(relayGPIOs[0], LOW);
-      prev = Z_1;
-      addLog("AUTO: ZONE 1 - HR: " + String(hr) + " (above " + String(T_0) + ")");
-      broadcastStatus();
-    }
-    else if (hr >= T_1 && (prev == Z_0 || prev == Z_1))
-    {
-      for (int i = 0; i < NUM_RELAYS; i++)
-      {
-        digitalWrite(relayGPIOs[i], HIGH);
-      }
-      digitalWrite(relayGPIOs[1], LOW);
-      prev = Z_2;
-      addLog("AUTO: ZONE 2 - HR: " + String(hr) + " (above " + String(T_1) + ")");
-      broadcastStatus();
-    }
-    else if (hr >= T_2 && prev != Z_3)
-    {
-      for (int i = 0; i < NUM_RELAYS; i++)
-      {
-        digitalWrite(relayGPIOs[i], HIGH);
-      }
-      digitalWrite(relayGPIOs[2], LOW);
-      prev = Z_3;
-      addLog("AUTO: ZONE 3 - HR: " + String(hr) + " (above " + String(T_2) + ")");
-      broadcastStatus();
-    }
-  }
-  
-  delay(1000);
+  // No delay() - loop runs freely, AsyncWebServer handles HTTP/WS in background
 }
 
 // Broadcast status update to all WebSocket clients
@@ -868,7 +861,8 @@ void broadcastStatus() {
                      ",\"T_2\":" + String(T_2) +
                      ",\"mode\":\"" + String(controlMode == MODE_AUTOMATIC ? "automatic" : "manual") + "\"" +
                      ",\"manualZone\":" + String(manualZone) +
-                     ",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+                     ",\"ip\":\"" + WiFi.localIP().toString() +
+                     "\",\"uptime\":" + String(millis() / 1000) + "}";
   ws.textAll(statusMsg);
 }
 
