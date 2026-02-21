@@ -48,6 +48,15 @@ uint8_t ledPin = 19;
 static BLEUUID serviceUUID("0000180d-0000-1000-8000-00805f9b34fb");
 static BLEUUID charUUID(BLEUUID((uint16_t)0x2A37));
 
+// Found BLE devices during scan
+struct FoundDevice {
+  String name;
+  String address;
+  BLEAdvertisedDevice* device;
+};
+std::vector<FoundDevice> foundDevices;
+String preferredAddress = ""; // Saved preferred HRM device address
+
 // BLE state
 static short prev = 0;
 static uint8_t hr = 0;
@@ -75,6 +84,7 @@ void addLog(String message);
 void broadcastStatus();
 void setZoneForHR(uint8_t heartRate); // Initialize zone based on current HR
 void scanComplete(BLEScanResults results); // Async BLE scan callback
+void broadcastDeviceList();              // Send found BLE devices to web UI
 
 // Function to add log entry
 void addLog(String message) {
@@ -188,11 +198,12 @@ class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks
   {
     if (advertisedDevice.haveServiceUUID() && advertisedDevice.isAdvertisingService(serviceUUID))
     {
-      pBLEScan->stop();
-      myDevice = new BLEAdvertisedDevice(advertisedDevice);
-      doConnect = true;
-      doScan = false;
-      addLog("Found HRM device: " + String(advertisedDevice.toString().c_str()));
+      String addr = String(advertisedDevice.getAddress().toString().c_str());
+      String name = advertisedDevice.haveName() ? String(advertisedDevice.getName().c_str()) : "Unknown HRM";
+      // Deduplicate
+      for (auto& d : foundDevices) { if (d.address == addr) return; }
+      foundDevices.push_back({name, addr, new BLEAdvertisedDevice(advertisedDevice)});
+      addLog("Found HRM: " + name + " (" + addr + ")");
     }
   }
 };
@@ -284,6 +295,33 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
           preferences.putUInt("T_2", T_2);
           preferences.end();
           addLog("Thresholds updated: T_0=" + String(T_0) + " T_1=" + String(T_1) + " T_2=" + String(T_2));
+        } else if (cmd == "connectDevice") {
+          String addr = doc["address"];
+          for (auto& d : foundDevices) {
+            if (d.address == addr) {
+              myDevice = d.device;
+              doConnect = true;
+              preferredAddress = addr;
+              preferences.begin("diyfan", false);
+              preferences.putString("prefAddr", addr);
+              preferences.end();
+              addLog("Connecting to: " + d.name + " (" + addr + ")");
+              break;
+            }
+          }
+        } else if (cmd == "rescan") {
+          if (!connected && !isScanning) {
+            for (auto& d : foundDevices) delete d.device;
+            foundDevices.clear();
+            doScan = true;
+            addLog("Manual rescan requested");
+          }
+        } else if (cmd == "forgetDevice") {
+          preferredAddress = "";
+          preferences.begin("diyfan", false);
+          preferences.remove("prefAddr");
+          preferences.end();
+          addLog("Preferred HRM device forgotten");
         }
       }
     }
@@ -418,6 +456,15 @@ const char index_html[] PROGMEM = R"rawliteral(
         .relay.active { 
             background: #4CAF50; 
         }
+        .device-btn { 
+            display: block;
+            width: 100%;
+            text-align: left;
+            margin: 4px 0;
+            background: #3d3d3d;
+            border: 1px solid #555;
+        }
+        .device-btn:hover { background: #4CAF50; }
     </style>
 </head>
 <body>
@@ -485,7 +532,14 @@ const char index_html[] PROGMEM = R"rawliteral(
                 <h3>System</h3>
                 <button onclick="resetSettings()" class="warning">Reset Settings</button>
                 <button onclick="restartDevice()" class="danger">Restart Device</button>
+                <button onclick="forgetDevice()" style="background:#555">Change HRM Device</button>
             </div>
+        </div>
+
+        <div class="controls" id="devicePickerSection" style="display:none;">
+            <h3>Select HRM Device</h3>
+            <div id="deviceList"></div>
+            <button onclick="rescan()" style="background:#555;margin-top:8px">🔄 Rescan</button>
         </div>
 
         <div class="controls">
@@ -523,6 +577,8 @@ const char index_html[] PROGMEM = R"rawliteral(
                     document.getElementById('zone').textContent = getZoneName(data.zone);
                     document.getElementById('hrmStatus').textContent = data.connected ? 'Connected' : 'Disconnected';
                     document.getElementById('hrmStatus').style.color = data.connected ? '#4CAF50' : '#f44336';
+                    // Hide device picker when connected
+                    if (data.connected) document.getElementById('devicePickerSection').style.display = 'none';
                     if (!thresholdsDirty) {
                         document.getElementById('t0').value = data.T_0;
                         document.getElementById('t1').value = data.T_1;
@@ -532,6 +588,8 @@ const char index_html[] PROGMEM = R"rawliteral(
                     if (data.uptime !== undefined) document.getElementById('uptime').textContent = formatUptime(data.uptime);
                     updateRelayDisplay(data.zone);
                     updateModeUI(data.mode, data.manualZone);
+                } else if (data.type === 'deviceList') {
+                    showDevicePicker(data.devices);
                 } else if (data.type === 'log') {
                     addConsoleLog(data.message);
                 }
@@ -646,6 +704,42 @@ const char index_html[] PROGMEM = R"rawliteral(
             return (h > 0 ? h + 'h ' : '') + (m > 0 ? m + 'm ' : '') + s + 's';
         }
         
+        function showDevicePicker(devices) {
+            let section = document.getElementById('devicePickerSection');
+            let list = document.getElementById('deviceList');
+            list.innerHTML = '';
+            if (devices.length === 0) { section.style.display = 'none'; return; }
+            section.style.display = 'block';
+            devices.forEach(d => {
+                let btn = document.createElement('button');
+                btn.className = 'device-btn';
+                btn.textContent = '📡 ' + d.name + '  (' + d.address + ')';
+                btn.onclick = () => connectDevice(d.address);
+                list.appendChild(btn);
+            });
+        }
+        
+        function connectDevice(address) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({cmd: 'connectDevice', address: address}));
+                document.getElementById('devicePickerSection').style.display = 'none';
+            }
+        }
+        
+        function rescan() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({cmd: 'rescan'}));
+                document.getElementById('deviceList').innerHTML = '<p style="color:#888">Scanning...</p>';
+            }
+        }
+        
+        function forgetDevice() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({cmd: 'forgetDevice'}));
+                ws.send(JSON.stringify({cmd: 'rescan'}));
+            }
+        }
+        
         // Connect WebSocket
         connect();
         
@@ -672,7 +766,10 @@ void setup()
   T_2 = preferences.getUInt("T_2", 160);
   controlMode = (ControlMode)preferences.getInt("mode", MODE_AUTOMATIC);
   manualZone = preferences.getInt("manualZone", 0);
+  preferredAddress = preferences.getString("prefAddr", "");
   preferences.end();
+  if (preferredAddress.length() > 0)
+    Serial.println("Preferred HRM: " + preferredAddress);
   
   Serial.printf("Loaded thresholds: T_0=%d, T_1=%d, T_2=%d\n", T_0, T_1, T_2);
   Serial.printf("Control mode: %s, Manual zone: %d\n", 
@@ -736,9 +833,29 @@ void setup()
 
 void scanComplete(BLEScanResults results) {
   isScanning = false;
-  if (!connected) {
-    doScan = true; // Schedule rescan if still not connected
+  if (connected) return;
+  if (foundDevices.empty()) {
+    doScan = true; // nothing found, rescan
+    return;
   }
+  // Auto-connect to preferred device if it was found
+  if (preferredAddress.length() > 0) {
+    for (auto& d : foundDevices) {
+      if (d.address == preferredAddress) {
+        myDevice = d.device;
+        doConnect = true;
+        return;
+      }
+    }
+  }
+  // Only one device found - auto-connect
+  if (foundDevices.size() == 1) {
+    myDevice = foundDevices[0].device;
+    doConnect = true;
+    return;
+  }
+  // Multiple devices - let user pick
+  broadcastDeviceList();
 }
 
 void loop()
@@ -760,6 +877,9 @@ void loop()
   // Async BLE scan - starts scan and returns immediately, scanComplete() called when done
   if (!connected && doScan && !isScanning)
   {
+    // Clear previous scan results
+    for (auto& d : foundDevices) delete d.device;
+    foundDevices.clear();
     isScanning = true;
     doScan = false;
     addLog("Scanning for HRM devices...");
@@ -866,7 +986,15 @@ void broadcastStatus() {
   ws.textAll(statusMsg);
 }
 
-// Initialize zone based on current heart rate (called when HRM first connects)
+void broadcastDeviceList() {
+  String msg = "{\"type\":\"deviceList\",\"devices\":[";
+  for (size_t i = 0; i < foundDevices.size(); i++) {
+    if (i > 0) msg += ",";
+    msg += "{\"name\":\"" + foundDevices[i].name + "\",\"address\":\"" + foundDevices[i].address + "\"}";
+  }
+  msg += "]}";
+  ws.textAll(msg);
+}
 void setZoneForHR(uint8_t heartRate) {
   int targetZone = Z_0;
   
